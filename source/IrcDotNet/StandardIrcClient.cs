@@ -40,31 +40,6 @@ namespace IrcDotNet
         {
             socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 
-            socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-#if NETCOREAPP3_0_OR_GREATER
-            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 30);
-            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
-            socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
-#else
-
-            // Get the size of the uint to use to back the byte array
-            int size = Marshal.SizeOf((uint)0);
-
-            // Create the byte array
-            byte[] keepAlive = new byte[size * 3];
-
-            // Pack the byte array:
-            // Turn keepalive on
-            Buffer.BlockCopy(BitConverter.GetBytes((uint)1), 0, keepAlive, 0, size);
-            // Set amount of time without activity before sending a keepalive to 5 seconds
-            Buffer.BlockCopy(BitConverter.GetBytes((uint)30000), 0, keepAlive, size, size);
-            // Set keepalive interval to 5 seconds
-            Buffer.BlockCopy(BitConverter.GetBytes((uint)5000), 0, keepAlive, size * 2, size);
-
-            // Set the keep-alive settings on the underlying Socket
-            socket.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
-#endif
-
             sendTimer = new Timer(WritePendingMessages, null,
                 Timeout.Infinite, Timeout.Infinite);
             disconnectedEvent = new AutoResetEvent(false);
@@ -485,6 +460,30 @@ namespace IrcDotNet
                     HandleSocketError(e.SocketError);
                     return;
                 }
+
+		socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+#if NETCOREAPP3_0_OR_GREATER
+		socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 30);
+        	socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
+        	socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
+#else
+            // Get the size of the uint to use to back the byte array
+            int size = Marshal.SizeOf((uint)0);
+
+            // Create the byte array
+            byte[] keepAlive = new byte[size * 3];
+
+            // Pack the byte array:
+            // Turn keepalive on
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)1), 0, keepAlive, 0, size);
+            // Set amount of time without activity before sending a keepalive to 5 seconds
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)30000), 0, keepAlive, size, size);
+            // Set keepalive interval to 5 seconds
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)5000), 0, keepAlive, size * 2, size);
+
+            // Set the keep-alive settings on the underlying Socket
+            socket.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
+#endif
 
                 Debug.Assert(e.UserToken != null);
                 var token = (Tuple<bool, string, IrcRegistrationInfo>)e.UserToken;
