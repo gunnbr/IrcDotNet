@@ -52,32 +52,25 @@ namespace IrcDotNet
             get
             {
                 CheckDisposed();
-                // This is how you can determine whether a socket is still connected.
-                bool blockingState = socket.Blocking;
+                // Capture the socket reference so a concurrent Dispose cannot null it mid-check.
+                var localSocket = socket;
+                if (localSocket == null)
+                    return false;
                 try
                 {
-                    byte[] tmp = new byte[1];
-
-                    socket.Blocking = false;
-                    var bytesSent = socket.Send(tmp, 0, 0);
-                    return bytesSent == 0;
+                    // A socket is considered disconnected when it is readable but no data is
+                    // available: Poll returns true for a closed or reset connection, and in that
+                    // case Available is 0. This avoids mutating the socket's blocking mode, so
+                    // concurrent callers cannot leave the socket permanently non-blocking.
+                    return !(localSocket.Poll(0, SelectMode.SelectRead) && localSocket.Available == 0);
                 }
-                catch (SocketException e)
+                catch (SocketException)
                 {
-                    // 10035 == WSAEWOULDBLOCK
-                    if (e.SocketErrorCode.Equals(10035))
-                    {
-                        // Still connected, but the send would block
-                        return true;
-                    }
-                    else
-                    {
-                        return false;
-                    }
+                    return false;
                 }
-                finally
+                catch (ObjectDisposedException)
                 {
-                    socket.Blocking = blockingState;
+                    return false;
                 }
             }
         }
@@ -461,29 +454,47 @@ namespace IrcDotNet
                     return;
                 }
 
-		socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+
+                // Keepalive tuning is best-effort: not every OS/version supports these options,
+                // and an unsupported option throws. Keepalive itself stays enabled above.
+                try
+                {
 #if NETCOREAPP3_0_OR_GREATER
-		socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 30);
-        	socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
-        	socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
+                    // Idle time before the first keepalive probe (30 seconds).
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 30);
+                    // Interval between probes (5 seconds).
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
+                    // Number of unacknowledged probes before the connection is dropped.
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
 #else
-            // Get the size of the uint to use to back the byte array
-            int size = Marshal.SizeOf((uint)0);
+                    // Get the size of the uint to use to back the byte array
+                    int size = Marshal.SizeOf((uint)0);
 
-            // Create the byte array
-            byte[] keepAlive = new byte[size * 3];
+                    // Create the byte array
+                    byte[] keepAlive = new byte[size * 3];
 
-            // Pack the byte array:
-            // Turn keepalive on
-            Buffer.BlockCopy(BitConverter.GetBytes((uint)1), 0, keepAlive, 0, size);
-            // Set amount of time without activity before sending a keepalive to 5 seconds
-            Buffer.BlockCopy(BitConverter.GetBytes((uint)30000), 0, keepAlive, size, size);
-            // Set keepalive interval to 5 seconds
-            Buffer.BlockCopy(BitConverter.GetBytes((uint)5000), 0, keepAlive, size * 2, size);
+                    // Pack the byte array:
+                    // Turn keepalive on
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)1), 0, keepAlive, 0, size);
+                    // Set idle time before sending a keepalive to 30 seconds
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)30000), 0, keepAlive, size, size);
+                    // Set keepalive interval to 5 seconds
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)5000), 0, keepAlive, size * 2, size);
 
-            // Set the keep-alive settings on the underlying Socket
-            socket.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
+                    // Set the keep-alive settings on the underlying Socket
+                    socket.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
 #endif
+                }
+                catch (SocketException)
+                {
+                    // Platform does not support keepalive tuning; the OS default keepalive
+                    // interval (enabled above) remains in effect.
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    // e.g. IOControl(KeepAliveValues) on non-Windows platforms.
+                }
 
                 Debug.Assert(e.UserToken != null);
                 var token = (Tuple<bool, string, IrcRegistrationInfo>)e.UserToken;
