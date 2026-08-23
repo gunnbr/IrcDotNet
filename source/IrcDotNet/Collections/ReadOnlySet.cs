@@ -19,6 +19,9 @@ namespace IrcDotNet.Collections
 #endif
     [DebuggerDisplay("Count = {Count}")]
     public class ReadOnlySet<T> : ISet<T>, ICollection<T>, IEnumerable<T>, ICollection, IEnumerable
+#if NET5_0_OR_GREATER
+        , IReadOnlySet<T>
+#endif
 #if !SILVERLIGHT && !NETSTANDARD1_5
         , ISerializable, IDeserializationCallback
 #endif

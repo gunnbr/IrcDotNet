@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using IrcDotNet.Properties;
+using System.Runtime.InteropServices;
 #if !SILVERLIGHT
 using System.Net.Security;
 
@@ -38,6 +39,7 @@ namespace IrcDotNet
         public StandardIrcClient()
         {
             socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+
             sendTimer = new Timer(WritePendingMessages, null,
                 Timeout.Infinite, Timeout.Infinite);
             disconnectedEvent = new AutoResetEvent(false);
@@ -45,12 +47,38 @@ namespace IrcDotNet
             messageSendQueue = new Queue<Tuple<string, object>>();
         }
 
+        /// <summary>
+        /// Gets whether the client is currently connected to a server.
+        /// </summary>
+        /// <remarks>
+        /// This reflects the last known state of the underlying socket. A connection that
+        /// has dropped is detected by the asynchronous receive loop, which tears the
+        /// connection down on a zero-byte read or a socket error; the TCP keepalive enabled
+        /// on connect bounds how long a silently-dropped (e.g. unreachable) peer can go
+        /// undetected. Detection is therefore eventual rather than instantaneous, and the
+        /// <see cref="IrcClient.Disconnected"/> event is the authoritative notification of
+        /// connection loss. The property is deliberately a single, non-mutating observation
+        /// of the socket so that it is safe to read concurrently with the active receive
+        /// loop (an active read probe would race with it, and toggling the socket's blocking
+        /// mode would corrupt shared state).
+        /// </remarks>
         public override bool IsConnected
         {
             get
             {
                 CheckDisposed();
-                return socket != null && socket.Connected;
+                // Capture the socket reference so a concurrent Dispose cannot null it mid-check.
+                var localSocket = socket;
+                if (localSocket == null)
+                    return false;
+                try
+                {
+                    return localSocket.Connected;
+                }
+                catch (ObjectDisposedException)
+                {
+                    return false;
+                }
             }
         }
 
@@ -318,7 +346,7 @@ namespace IrcDotNet
 
                 // Handle sent IRC message.
                 Debug.Assert(e.UserToken != null);
-                var messageSentEventArgs = (IrcRawMessageEventArgs) e.UserToken;
+                var messageSentEventArgs = (IrcRawMessageEventArgs)e.UserToken;
                 OnRawMessageSent(messageSentEventArgs);
 
 #if DEBUG
@@ -345,9 +373,9 @@ namespace IrcDotNet
         {
             // Read data received from socket to buffer asynchronously.
             var receiveEventArgs = new SocketAsyncEventArgs();
-            Debug.Assert(receiveStream.Buffer.Length - (int) receiveStream.WritePosition > 0);
-            receiveEventArgs.SetBuffer(receiveStream.Buffer, (int) receiveStream.WritePosition,
-                receiveStream.Buffer.Length - (int) receiveStream.WritePosition);
+            Debug.Assert(receiveStream.Buffer.Length - (int)receiveStream.WritePosition > 0);
+            receiveEventArgs.SetBuffer(receiveStream.Buffer, (int)receiveStream.WritePosition,
+                receiveStream.Buffer.Length - (int)receiveStream.WritePosition);
             receiveEventArgs.Completed += ReceiveCompleted;
 
             if (!socket.ReceiveAsync(receiveEventArgs))
@@ -433,8 +461,50 @@ namespace IrcDotNet
                     return;
                 }
 
+                socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+
+                // Keepalive tuning is best-effort: not every OS/version supports these options,
+                // and an unsupported option throws. Keepalive itself stays enabled above.
+                try
+                {
+#if NETCOREAPP3_0_OR_GREATER
+                    // Idle time before the first keepalive probe (30 seconds).
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 30);
+                    // Interval between probes (5 seconds).
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
+                    // Number of unacknowledged probes before the connection is dropped.
+                    socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 5);
+#else
+                    // Get the size of the uint to use to back the byte array
+                    int size = Marshal.SizeOf((uint)0);
+
+                    // Create the byte array
+                    byte[] keepAlive = new byte[size * 3];
+
+                    // Pack the byte array:
+                    // Turn keepalive on
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)1), 0, keepAlive, 0, size);
+                    // Set idle time before sending a keepalive to 30 seconds
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)30000), 0, keepAlive, size, size);
+                    // Set keepalive interval to 5 seconds
+                    Buffer.BlockCopy(BitConverter.GetBytes((uint)5000), 0, keepAlive, size * 2, size);
+
+                    // Set the keep-alive settings on the underlying Socket
+                    socket.IOControl(IOControlCode.KeepAliveValues, keepAlive, null);
+#endif
+                }
+                catch (SocketException)
+                {
+                    // Platform does not support keepalive tuning; the OS default keepalive
+                    // interval (enabled above) remains in effect.
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    // e.g. IOControl(KeepAliveValues) on non-Windows platforms.
+                }
+
                 Debug.Assert(e.UserToken != null);
-                var token = (Tuple<bool, string, IrcRegistrationInfo>) e.UserToken;
+                var token = (Tuple<bool, string, IrcRegistrationInfo>)e.UserToken;
 
                 // Create stream for received data. Use SSL stream on top of network stream, if specified.
                 receiveStream = new CircularBufferStream(socketReceiveBufferSize);
@@ -524,7 +594,7 @@ namespace IrcDotNet
         protected override void HandleClientConnected(IrcRegistrationInfo regInfo)
         {
             DebugUtilities.WriteEvent(string.Format("Connected to server at '{0}'.",
-                ((IPEndPoint) socket.RemoteEndPoint).Address));
+                ((IPEndPoint)socket.RemoteEndPoint).Address));
 
             base.HandleClientConnected(regInfo);
         }
@@ -548,7 +618,7 @@ namespace IrcDotNet
 
         private void HandleSocketError(SocketError error)
         {
-            HandleSocketError(new SocketException((int) error));
+            HandleSocketError(new SocketException((int)error));
         }
 
         private void HandleSocketError(SocketException exception)
@@ -611,5 +681,5 @@ namespace IrcDotNet
         }
 
 #endif
-            }
+    }
 }
