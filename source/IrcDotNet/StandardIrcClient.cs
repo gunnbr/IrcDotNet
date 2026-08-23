@@ -58,11 +58,13 @@ namespace IrcDotNet
                     return false;
                 try
                 {
-                    // A socket is considered disconnected when it is readable but no data is
-                    // available: Poll returns true for a closed or reset connection, and in that
-                    // case Available is 0. This avoids mutating the socket's blocking mode, so
-                    // concurrent callers cannot leave the socket permanently non-blocking.
-                    return !(localSocket.Poll(0, SelectMode.SelectRead) && localSocket.Available == 0);
+                    // Socket.Connected is the prerequisite: it is false for a socket that has
+                    // never connected or has been disconnected. For a connected socket, treat it
+                    // as disconnected if the peer has closed the connection, which shows up as the
+                    // socket being readable with no data available. This avoids mutating the
+                    // socket's blocking mode, so concurrent callers stay safe.
+                    return localSocket.Connected
+                        && !(localSocket.Poll(0, SelectMode.SelectRead) && localSocket.Available == 0);
                 }
                 catch (SocketException)
                 {
