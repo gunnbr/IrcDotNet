@@ -58,17 +58,13 @@ namespace IrcDotNet
                     return false;
                 try
                 {
-                    // Socket.Connected is the prerequisite: it is false for a socket that has
-                    // never connected or has been disconnected. For a connected socket, treat it
-                    // as disconnected if the peer has closed the connection, which shows up as the
-                    // socket being readable with no data available. This avoids mutating the
-                    // socket's blocking mode, so concurrent callers stay safe.
-                    return localSocket.Connected
-                        && !(localSocket.Poll(0, SelectMode.SelectRead) && localSocket.Available == 0);
-                }
-                catch (SocketException)
-                {
-                    return false;
+                    // Rely on the socket's own connection state, which the active receive loop
+                    // keeps current: ReceiveCompleted tears the connection down on a zero-byte
+                    // read or a socket error, and the TCP keepalive enabled on connect forces a
+                    // dead peer to surface as such. This is a single, non-mutating observation,
+                    // so it does not race with the pending asynchronous receive the way a
+                    // Poll/Available probe would.
+                    return localSocket.Connected;
                 }
                 catch (ObjectDisposedException)
                 {
