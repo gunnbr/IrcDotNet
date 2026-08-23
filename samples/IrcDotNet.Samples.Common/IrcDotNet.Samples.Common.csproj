@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <VersionPrefix>0.6</VersionPrefix>
-    <TargetFrameworks>netstandard1.5</TargetFrameworks>
+    <TargetFramework>netstandard2.0</TargetFramework>
     <AssemblyName>IrcDotNet.Samples.Common</AssemblyName>
     <PackageId>IrcDotNet.Samples.Common</PackageId>
     <PackageTags>communication;irc;networking;ctcp</PackageTags>
@@ -10,7 +10,6 @@
     <PackageProjectUrl>https://github.com/IrcDotNet/IrcDotNet/</PackageProjectUrl>
     <PackageLicenseUrl>https://github.com/IrcDotNet/IrcDotNet/License.txt</PackageLicenseUrl>
     <PackageRequireLicenseAcceptance>true</PackageRequireLicenseAcceptance>
-    <NetStandardImplicitPackageVersion Condition=" '$(TargetFramework)' == 'netstandard1.5' ">1.6.0</NetStandardImplicitPackageVersion>
     <GenerateAssemblyTitleAttribute>false</GenerateAssemblyTitleAttribute>
     <GenerateAssemblyDescriptionAttribute>false</GenerateAssemblyDescriptionAttribute>
     <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
