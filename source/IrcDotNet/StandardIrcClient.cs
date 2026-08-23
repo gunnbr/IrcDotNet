@@ -47,6 +47,21 @@ namespace IrcDotNet
             messageSendQueue = new Queue<Tuple<string, object>>();
         }
 
+        /// <summary>
+        /// Gets whether the client is currently connected to a server.
+        /// </summary>
+        /// <remarks>
+        /// This reflects the last known state of the underlying socket. A connection that
+        /// has dropped is detected by the asynchronous receive loop, which tears the
+        /// connection down on a zero-byte read or a socket error; the TCP keepalive enabled
+        /// on connect bounds how long a silently-dropped (e.g. unreachable) peer can go
+        /// undetected. Detection is therefore eventual rather than instantaneous, and the
+        /// <see cref="IrcClient.Disconnected"/> event is the authoritative notification of
+        /// connection loss. The property is deliberately a single, non-mutating observation
+        /// of the socket so that it is safe to read concurrently with the active receive
+        /// loop (an active read probe would race with it, and toggling the socket's blocking
+        /// mode would corrupt shared state).
+        /// </remarks>
         public override bool IsConnected
         {
             get
@@ -58,12 +73,6 @@ namespace IrcDotNet
                     return false;
                 try
                 {
-                    // Rely on the socket's own connection state, which the active receive loop
-                    // keeps current: ReceiveCompleted tears the connection down on a zero-byte
-                    // read or a socket error, and the TCP keepalive enabled on connect forces a
-                    // dead peer to surface as such. This is a single, non-mutating observation,
-                    // so it does not race with the pending asynchronous receive the way a
-                    // Poll/Available probe would.
                     return localSocket.Connected;
                 }
                 catch (ObjectDisposedException)
