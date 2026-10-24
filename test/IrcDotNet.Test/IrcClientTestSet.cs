@@ -173,7 +173,7 @@ namespace IrcDotNet.Test
             // Initialize wait handles for all events.
             GetAllWaitHandlesFields().ForEach(fieldInfo => fieldInfo.SetValue(null, new AutoResetEvent(false)));
 
-            // Nick name length limit on irc.freenode.net is 16 chars.
+            // Nick name length limit on irc.libera.chat is 16 chars.
             Func<string> getRandomUserId = () => Guid.NewGuid().ToString().Substring(0, 8);
 
             serverPassword = TestSettings.ServerPassword;

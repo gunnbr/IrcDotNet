@@ -51,7 +51,7 @@ namespace IrcDotNet.Test
             MessageProtocolError = Env("MessageProtocolError") ?? "Client {0}: protocol error {1}: {2}\nParameters: {2}";
             NickNameFormat = Env("NickNameFormat") ?? "itb-{0}";
             RealName = Env("RealName") ?? "IRC.Net Tester";
-            ServerHostName = Env("ServerHostName") ?? "irc.freenode.net";
+            ServerHostName = Env("ServerHostName") ?? "irc.libera.chat";
             ServerPort = Env("ServerPort") == null ? 8000 : Int32.Parse(Env("ServerPort"));  //Appveyor blocks port 6667
             ServerPassword = Env("ServerPassword") ?? "";
         }
