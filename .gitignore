@@ -49,4 +49,5 @@ tools/
 TestResult.xml
 *.lock.json
 .vs/
-.vscode/nupkg/
+.vscode/
+nupkg/
