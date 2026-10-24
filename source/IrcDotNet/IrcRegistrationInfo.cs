@@ -52,6 +52,30 @@ namespace IrcDotNet
         /// </summary>
         /// <value>A collection of modes to set on the local user.</value>
         public ICollection<char> UserModes { get; set; }
+
+        /// <summary>
+        ///     Gets or sets a value indicating whether to use SASL authentication during registration.
+        ///     When set to <see langword="true"/>, the client will negotiate SASL capability and 
+        ///     authenticate before completing registration.
+        /// </summary>
+        /// <value><see langword="true"/> to use SASL authentication; otherwise, <see langword="false"/>.</value>
+        public bool UseSasl { get; set; }
+
+        /// <summary>
+        ///     Gets or sets the SASL authentication username.
+        ///     If not specified, <see cref="IrcRegistrationInfo.NickName"/> will be used.
+        ///     This property is only used when <see cref="UseSasl"/> is <see langword="true"/>.
+        /// </summary>
+        /// <value>The SASL authentication username.</value>
+        public string SaslUsername { get; set; }
+
+        /// <summary>
+        ///     Gets or sets the SASL authentication password.
+        ///     If not specified, <see cref="IrcRegistrationInfo.Password"/> will be used.
+        ///     This property is only used when <see cref="UseSasl"/> is <see langword="true"/>.
+        /// </summary>
+        /// <value>The SASL authentication password.</value>
+        public string SaslPassword { get; set; }
     }
 
     /// <summary>

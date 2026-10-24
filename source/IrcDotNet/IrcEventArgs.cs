@@ -763,4 +763,34 @@ namespace IrcDotNet
         /// <value>The error encountered by the client.</value>
         public Exception Error { get; private set; }
     }
+
+    /// <summary>
+    ///     Provides data for the <see cref="IrcClient.SaslAuthenticationFailed" /> event.
+    /// </summary>
+    /// <threadsafety static="true" instance="false" />
+    public class SaslAuthenticationFailedEventArgs : EventArgs
+    {
+        /// <summary>
+        ///     Initializes a new instance of the <see cref="SaslAuthenticationFailedEventArgs" /> class.
+        /// </summary>
+        /// <param name="mechanism">The SASL mechanism that was used.</param>
+        /// <param name="message">A message describing the reason for the failure.</param>
+        public SaslAuthenticationFailedEventArgs(string mechanism, string message)
+        {
+            Mechanism = mechanism;
+            Message = message;
+        }
+
+        /// <summary>
+        ///     Gets the SASL mechanism that was used for authentication.
+        /// </summary>
+        /// <value>The SASL mechanism (e.g., "PLAIN").</value>
+        public string Mechanism { get; private set; }
+
+        /// <summary>
+        ///     Gets a message describing the reason for the authentication failure.
+        /// </summary>
+        /// <value>The failure reason message.</value>
+        public string Message { get; private set; }
+    }
 }

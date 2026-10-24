@@ -36,6 +36,13 @@ namespace IrcDotNet
         // Network (TCP) I/O.
         private Socket socket;
 
+        // TLS transport. When SSL is used, a single duplex SslStream is layered directly over
+        // the socket and carries both sent and received data. The socket-based receive buffer
+        // (receiveStream/ReceiveAsync) and the raw socket send path are used only for plaintext.
+        private SslStream sslStream;
+        private bool useSslTransport;
+        private Thread sslReceiveThread;
+
         public StandardIrcClient()
         {
             socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -104,6 +111,9 @@ namespace IrcDotNet
                     dataStream.Dispose();
                     dataStream = null;
                 }
+                // dataStream and sslStream reference the same object when using TLS; the field is
+                // cleared here after the shared instance has been disposed above.
+                sslStream = null;
                 if (dataStreamReader != null)
                 {
                     dataStreamReader.Dispose();
@@ -232,8 +242,13 @@ namespace IrcDotNet
         public virtual void Connect(EndPoint remoteEndPoint, bool useSsl, IrcRegistrationInfo registrationInfo)
         {
             Connect(registrationInfo);
+            // Determine the host name to use for TLS server name indication (SNI) and certificate
+            // validation. Previously an empty string was passed, which breaks the TLS handshake.
+            var targetHost = (remoteEndPoint as DnsEndPoint)?.Host
+                ?? (remoteEndPoint as IPEndPoint)?.Address.ToString()
+                ?? string.Empty;
             // Connect socket to remote host.
-            ConnectAsync(remoteEndPoint, Tuple.Create(useSsl, string.Empty, registrationInfo));
+            ConnectAsync(remoteEndPoint, Tuple.Create(useSsl, targetHost, registrationInfo));
 
             HandleClientConnecting();
         }
@@ -256,6 +271,8 @@ namespace IrcDotNet
                 dataStream.Dispose();
             if (dataStreamReader != null)
                 dataStreamReader = null;
+            sslStream = null;
+            useSslTransport = false;
         }
 
         private void WritePendingMessages(object state)
@@ -324,6 +341,35 @@ namespace IrcDotNet
 
         private void SendAsync(byte[] buffer, int offset, int count, object token = null)
         {
+#if !SILVERLIGHT
+            if (useSslTransport)
+            {
+                // Write through the TLS stream, then raise the sent event as the socket-based
+                // completion path does.
+                try
+                {
+                    sslStream.Write(buffer, offset, count);
+                    sslStream.Flush();
+
+                    Debug.Assert(token != null);
+                    var messageSentEventArgs = (IrcRawMessageEventArgs)token;
+                    OnRawMessageSent(messageSentEventArgs);
+
+#if DEBUG
+                    DebugUtilities.WriteIrcRawLine(this, "<<< " + messageSentEventArgs.RawContent);
+#endif
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Ignore.
+                }
+                catch (Exception ex)
+                {
+                    OnError(new IrcErrorEventArgs(ex));
+                }
+                return;
+            }
+#endif
             // Write data from buffer to socket asynchronously.
             var sendEventArgs = new SocketAsyncEventArgs();
             sendEventArgs.SetBuffer(buffer, offset, count);
@@ -366,6 +412,41 @@ namespace IrcDotNet
             finally
             {
                 e.Dispose();
+            }
+        }
+
+        private void SslReceiveLoop()
+        {
+            try
+            {
+                while (true)
+                {
+                    // ReadLine blocks (via Peek) until a terminated line is available and only
+                    // returns null when the underlying stream is closed by the peer.
+                    var line = dataStreamLineReader.ReadLine();
+                    if (line == null)
+                    {
+                        Disconnect();
+                        break;
+                    }
+                    if (line.Length == 0)
+                        continue;
+
+                    ParseMessage(line);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ignore - the client is disconnecting or being disposed.
+            }
+            catch (IOException)
+            {
+                // Underlying socket/stream failure; treat as a disconnect.
+                HandleClientDisconnected();
+            }
+            catch (Exception ex)
+            {
+                OnError(new IrcErrorEventArgs(ex));
             }
         }
 
@@ -506,12 +587,46 @@ namespace IrcDotNet
                 Debug.Assert(e.UserToken != null);
                 var token = (Tuple<bool, string, IrcRegistrationInfo>)e.UserToken;
 
-                // Create stream for received data. Use SSL stream on top of network stream, if specified.
+                useSslTransport = token.Item1;
+
+#if !SILVERLIGHT
+                if (useSslTransport)
+                {
+                    // TLS: layer a single duplex SslStream directly over the socket so that both
+                    // sent and received data pass through the same encrypted stream. (The prior
+                    // design wrapped only the receive-side circular buffer, so the ClientHello was
+                    // never sent to the server and the handshake failed immediately.)
+                    var networkStream = new NetworkStream(socket, ownsSocket: false);
+                    sslStream = new SslStream(networkStream, false, SslUserCertificateValidationCallback);
+                    sslStream.AuthenticateAsClient(token.Item2);
+                    Debug.Assert(sslStream.IsAuthenticated);
+
+                    dataStream = sslStream;
+                    dataStreamReader = new StreamReader(dataStream, TextEncoding);
+                    dataStreamLineReader = new SafeLineReader(dataStreamReader);
+
+                    // Start sending; receiving is handled by a dedicated blocking read loop
+                    // because the SslStream cannot be driven by the socket-level receive buffer.
+                    sendTimer.Change(0, Timeout.Infinite);
+
+                    sslReceiveThread = new Thread(SslReceiveLoop)
+                    {
+                        IsBackground = true,
+                        Name = "IrcDotNet TLS Receive"
+                    };
+                    sslReceiveThread.Start();
+
+                    HandleClientConnected(token.Item3);
+                    return;
+                }
+#endif
+
+                // Plaintext: use the socket-based receive buffer directly.
                 receiveStream = new CircularBufferStream(socketReceiveBufferSize);
 #if SILVERLIGHT
                 this.dataStream = this.receiveStream;
 #else
-                dataStream = GetDataStream(token.Item1, token.Item2);
+                dataStream = receiveStream;
 #endif
                 dataStreamReader = new StreamReader(dataStream, TextEncoding);
                 dataStreamLineReader = new SafeLineReader(dataStreamReader);
@@ -530,12 +645,10 @@ namespace IrcDotNet
             {
                 // Ignore.
             }
-#if !DEBUG
             catch (Exception ex)
             {
                 OnConnectFailed(new IrcErrorEventArgs(ex));
             }
-#endif
             finally
             {
                 e.Dispose();
@@ -648,27 +761,6 @@ namespace IrcDotNet
         }
 
 #if !SILVERLIGHT
-
-        private Stream GetDataStream(bool useSsl, string targetHost)
-        {
-            if (useSsl)
-            {
-                // Create SSL stream over network stream to use for data transmission.
-                var sslStream = new SslStream(receiveStream, true,
-                    SslUserCertificateValidationCallback);
-
-#if NETSTANDARD1_5
-                var authTask = sslStream.AuthenticateAsClientAsync(targetHost);
-                authTask.Wait();
-#else
-                sslStream.AuthenticateAsClient(targetHost);
-#endif
-                Debug.Assert(sslStream.IsAuthenticated);
-                return sslStream;
-            }
-            // Use network stream directly for data transmission.
-            return receiveStream;
-        }
 
         private bool SslUserCertificateValidationCallback(object sender, X509Certificate certificate, X509Chain chain,
             SslPolicyErrors sslPolicyErrors)

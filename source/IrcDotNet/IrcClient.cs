@@ -348,6 +348,16 @@ namespace IrcDotNet
         public event EventHandler<CapabilityAcknowledgedEventArgs> CapabilityAcknowledged;
 
         /// <summary>
+        ///     Occurs when SASL authentication has succeeded.
+        /// </summary>
+        public event EventHandler<EventArgs> SaslAuthenticationSucceeded;
+
+        /// <summary>
+        ///     Occurs when SASL authentication has failed. The connection continues unauthenticated.
+        /// </summary>
+        public event EventHandler<SaslAuthenticationFailedEventArgs> SaslAuthenticationFailed;
+
+        /// <summary>
         ///     Occurs when the connection has been registered.
         /// </summary>
         /// <remarks>
@@ -1254,6 +1264,8 @@ namespace IrcDotNet
             ServerSupportedFeatures = new Collections.ReadOnlyDictionary<string, string>(serverSupportedFeatures);
             serverCapabilities = new List<string>();
             ServerCapabilities = new ReadOnlyCollection<string>(serverCapabilities);
+            saslInProgress = false;
+            saslRegistrationInfo = null;
             channelUserModes = new Collection<char>
             {
                 'o',
@@ -1626,42 +1638,122 @@ namespace IrcDotNet
 
         protected virtual void HandleClientConnected(IrcRegistrationInfo regInfo)
         {
-
-            if (regInfo.Password != null)
-                // Authenticate with server using password.
-                SendMessagePassword(regInfo.Password);
-
-            // Check if client is registering as service or normal user.
-            if (regInfo is IrcServiceRegistrationInfo)
+            // Check if client is registering as a normal user with SASL enabled
+            var userRegInfo = regInfo as IrcUserRegistrationInfo;
+            if (userRegInfo != null && userRegInfo.UseSasl)
             {
-                // Register client as service.
-                var serviceRegInfo = (IrcServiceRegistrationInfo) regInfo;
-                SendMessageService(serviceRegInfo.NickName, serviceRegInfo.Distribution,
-                    serviceRegInfo.Description);
+                // SASL path: defer NICK/USER and start CAP negotiation first
+                saslRegistrationInfo = userRegInfo;
+                saslInProgress = true;
 
-                localUser = new IrcLocalUser(serviceRegInfo.NickName, serviceRegInfo.Distribution,
-                    serviceRegInfo.Description);
+                // Create local user object but don't send NICK/USER yet
+                localUser = new IrcLocalUser(userRegInfo.NickName, userRegInfo.UserName, userRegInfo.RealName,
+                    userRegInfo.UserModes);
+                localUser.Client = this;
+
+                // Add local user to list of known users.
+                lock (((ICollection) Users).SyncRoot)
+                    users.Add(localUser);
+
+                // Start CAP negotiation - NICK/USER will be sent after SASL completes
+                SendMessageCapList();
             }
             else
             {
-                // Register client as normal user.
-                var userRegInfo = (IrcUserRegistrationInfo) regInfo;
-                SendMessageNick(userRegInfo.NickName);
-                SendMessageUser(userRegInfo.UserName, GetNumericUserMode(userRegInfo.UserModes),
-                    userRegInfo.RealName);
+                // Non-SASL path: use existing behavior
+                if (regInfo.Password != null)
+                    // Authenticate with server using password.
+                    SendMessagePassword(regInfo.Password);
 
-                localUser = new IrcLocalUser(userRegInfo.NickName, userRegInfo.UserName, userRegInfo.RealName,
-                    userRegInfo.UserModes);
+                // Check if client is registering as service or normal user.
+                if (regInfo is IrcServiceRegistrationInfo)
+                {
+                    // Register client as service.
+                    var serviceRegInfo = (IrcServiceRegistrationInfo) regInfo;
+                    SendMessageService(serviceRegInfo.NickName, serviceRegInfo.Distribution,
+                        serviceRegInfo.Description);
+
+                    localUser = new IrcLocalUser(serviceRegInfo.NickName, serviceRegInfo.Distribution,
+                        serviceRegInfo.Description);
+                }
+                else
+                {
+                    // Register client as normal user.
+                    SendMessageNick(userRegInfo.NickName);
+                    SendMessageUser(userRegInfo.UserName, GetNumericUserMode(userRegInfo.UserModes),
+                        userRegInfo.RealName);
+
+                    localUser = new IrcLocalUser(userRegInfo.NickName, userRegInfo.UserName, userRegInfo.RealName,
+                        userRegInfo.UserModes);
+                }
+                localUser.Client = this;
+
+                // Add local user to list of known users.
+                lock (((ICollection) Users).SyncRoot)
+                    users.Add(localUser);
+
+                SendMessageCapList();
+
+                OnConnected(new EventArgs());
             }
-            localUser.Client = this;
+        }
 
-            // Add local user to list of known users.
-            lock (((ICollection) Users).SyncRoot)
-                users.Add(localUser);
+        /// <summary>
+        ///     Completes registration after SASL authentication (or SASL failure).
+        ///     Sends NICK and USER messages and raises the Connected event.
+        /// </summary>
+        protected virtual void CompleteSaslRegistration()
+        {
+            if (saslRegistrationInfo == null)
+                return;
 
-            SendMessageCapList();
+            // Capture and clear the registration info to guard against double-send.
+            var regInfo = saslRegistrationInfo;
+            saslRegistrationInfo = null;
+
+            // Send NICK and USER now that SASL is complete
+            SendMessageNick(regInfo.NickName);
+            SendMessageUser(regInfo.UserName, GetNumericUserMode(regInfo.UserModes),
+                regInfo.RealName);
 
             OnConnected(new EventArgs());
+        }
+
+        /// <summary>
+        ///     Builds the SASL PLAIN authentication response according to RFC 4616.
+        ///     The response format is: authzid \0 authcid \0 password (base64 encoded).
+        ///     For IRC SASL, authzid is typically empty.
+        /// </summary>
+        /// <param name="username">The authentication username (authcid).</param>
+        /// <param name="password">The authentication password.</param>
+        /// <returns>Base64-encoded SASL PLAIN response, potentially split into 400-char chunks.</returns>
+        protected internal List<string> BuildSaslPlainResponse(string username, string password)
+        {
+            // SASL PLAIN format: [authzid] \0 authcid \0 password
+            // For IRC, authzid is typically empty, so: \0 username \0 password
+            var authString = "\0" + username + "\0" + password;
+            var authBytes = TextEncoding.GetBytes(authString);
+            var base64 = Convert.ToBase64String(authBytes);
+
+            // Split into 400-character chunks as per IRCv3 spec
+            var chunks = new List<string>();
+            for (int i = 0; i < base64.Length; i += 400)
+            {
+                int length = Math.Min(400, base64.Length - i);
+                chunks.Add(base64.Substring(i, length));
+            }
+
+            // If the payload is exactly a multiple of 400 bytes or is empty, send a lone "+"
+            if (base64.Length % 400 == 0 && base64.Length > 0)
+            {
+                chunks.Add("+");
+            }
+            else if (base64.Length == 0)
+            {
+                chunks.Add("+");
+            }
+
+            return chunks;
         }
 
         protected virtual void HandleClientDisconnected()
@@ -1798,6 +1890,24 @@ namespace IrcDotNet
         protected virtual void OnCapabilityAcknowledged(CapabilityAcknowledgedEventArgs e)
         {
             CapabilityAcknowledged?.Invoke(this, e);
+        }
+
+        /// <summary>
+        ///     Raises the <see cref="SaslAuthenticationSucceeded" /> event.
+        /// </summary>
+        /// <param name="e">The <see cref="EventArgs" /> instance containing the event data.</param>
+        protected virtual void OnSaslAuthenticationSucceeded(EventArgs e)
+        {
+            SaslAuthenticationSucceeded?.Invoke(this, e);
+        }
+
+        /// <summary>
+        ///     Raises the <see cref="SaslAuthenticationFailed" /> event.
+        /// </summary>
+        /// <param name="e">The <see cref="SaslAuthenticationFailedEventArgs" /> instance containing the event data.</param>
+        protected virtual void OnSaslAuthenticationFailed(SaslAuthenticationFailedEventArgs e)
+        {
+            SaslAuthenticationFailed?.Invoke(this, e);
         }
 
         /// <summary>
@@ -2109,7 +2219,11 @@ namespace IrcDotNet
 
         // List of capabilities supported by the server, populated upon successful connection
         private List<string> serverCapabilities;
-        
+
+        // SASL authentication state for the current connection
+        private bool saslInProgress;
+        private IrcUserRegistrationInfo saslRegistrationInfo;
+
         // Collection of channel modes that apply to users in a channel.
         private Collection<char> channelUserModes;
 

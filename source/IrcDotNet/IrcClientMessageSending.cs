@@ -78,7 +78,19 @@ namespace IrcDotNet
 
             WriteMessage(null, "CAP", "REQ", string.Join(" ", caps));
         }
-        
+
+        /// <summary>
+        ///     Sends an AUTHENTICATE message to the server during SASL authentication.
+        ///     This is used for both specifying the mechanism (e.g., "PLAIN") and sending
+        ///     the encoded authentication payload (base64 string or "+").
+        /// </summary>
+        /// <param name="data">The authentication mechanism name or base64-encoded payload.</param>
+        /// <returns>The produced <see cref="IrcMessage"/></returns>
+        protected IrcMessage SendMessageAuthenticate(string data)
+        {
+            return WriteMessage(null, "authenticate", data);
+        }
+
         /// <summary>
         ///     Sends a request to register the client as a user on the server.
         /// </summary>
