@@ -50,3 +50,4 @@ TestResult.xml
 *.lock.json
 .vs/
 .vscode/
+nupkg/

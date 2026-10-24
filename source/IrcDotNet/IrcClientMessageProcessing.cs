@@ -317,6 +317,22 @@ namespace IrcDotNet
                     serverCapabilities.AddRange(caps);
 
                     OnServerCapabilitiesReceived(new EventArgs());
+
+                    // If SASL is configured and the server supports it, request the capability.
+                    // Capability tokens may carry a value (e.g. "sasl=PLAIN,EXTERNAL"), so compare
+                    // only the name portion before any '='.
+                    if (saslInProgress && caps.Any(c => CapabilityNameEquals(c, "sasl")))
+                    {
+                        SendMessageCapRequest(new[] { "sasl" });
+                    }
+                    else if (saslInProgress)
+                    {
+                        // Server doesn't support SASL, abort SASL and continue without it
+                        OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", "Server does not support SASL"));
+                        saslInProgress = false;
+                        CompleteSaslRegistration();
+                        SendMessageCapEnd();
+                    }
                     break;
                 case "LIST":
                     string[] active = message.Parameters[2]?.Split(' ');
@@ -325,13 +341,89 @@ namespace IrcDotNet
                 case "ACK":
                     string[] ackd = message.Parameters[2]?.Split(' ');
                     OnCapabilityAcknowledged(new CapabilityAcknowledgedEventArgs(true, ackd));
-                    SendMessageCapEnd();
+
+                    // If SASL was acknowledged, start AUTHENTICATE exchange
+                    if (saslInProgress && ackd != null && ackd.Any(c => CapabilityNameEquals(c, "sasl")))
+                    {
+                        SendMessageAuthenticate("PLAIN");
+                    }
+                    else
+                    {
+                        // Non-SASL path or other capabilities
+                        SendMessageCapEnd();
+                    }
                     break;
                 case "NACK":
                     string[] nakd = message.Parameters[2]?.Split(' ');
                     OnCapabilityAcknowledged(new CapabilityAcknowledgedEventArgs(false, nakd));
+
+                    // If SASL capability was rejected, abort SASL and continue without it
+                    if (saslInProgress && nakd != null && nakd.Any(c => CapabilityNameEquals(c, "sasl")))
+                    {
+                        OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", "Server rejected SASL capability"));
+                        saslInProgress = false;
+                        CompleteSaslRegistration();
+                    }
+
                     SendMessageCapEnd();
                     break;
+            }
+        }
+
+        /// <summary>
+        ///     Determines whether a capability token matches the specified capability name,
+        ///     ignoring any value suffix (e.g. "sasl=PLAIN,EXTERNAL" matches "sasl").
+        /// </summary>
+        /// <param name="capabilityToken">The capability token as advertised by the server.</param>
+        /// <param name="name">The capability name to compare against.</param>
+        /// <returns><see langword="true"/> if the token names the capability; otherwise, <see langword="false"/>.</returns>
+        private static bool CapabilityNameEquals(string capabilityToken, string name)
+        {
+            if (capabilityToken == null)
+                return false;
+
+            // A capability may be advertised with a value, separated by '='. Compare only the name.
+            var separatorIndex = capabilityToken.IndexOf('=');
+            var capabilityName = separatorIndex >= 0
+                ? capabilityToken.Substring(0, separatorIndex)
+                : capabilityToken;
+
+            // Capabilities may also be prefixed with modifiers (e.g. '-' to disable); trim those.
+            capabilityName = capabilityName.TrimStart('-', '~', '=');
+
+            return capabilityName.Equals(name, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        ///     Process AUTHENTICATE messages received from the server during SASL authentication.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("authenticate")]
+        protected internal void ProcessMessageAuthenticate(IrcMessage message)
+        {
+            if (!saslInProgress || saslRegistrationInfo == null)
+                return;
+
+            Debug.Assert(message.Parameters[0] != null);
+            string response = message.Parameters[0];
+
+            // Server sends "+" to indicate it's ready to receive the authentication payload
+            if (response == "+")
+            {
+                // Get SASL username and password (with fallback to registration info)
+                string saslUsername = !string.IsNullOrEmpty(saslRegistrationInfo.SaslUsername)
+                    ? saslRegistrationInfo.SaslUsername
+                    : saslRegistrationInfo.NickName;
+                string saslPassword = !string.IsNullOrEmpty(saslRegistrationInfo.SaslPassword)
+                    ? saslRegistrationInfo.SaslPassword
+                    : saslRegistrationInfo.Password;
+
+                // Build and send the SASL PLAIN response
+                var responseChunks = BuildSaslPlainResponse(saslUsername, saslPassword);
+                foreach (var chunk in responseChunks)
+                {
+                    SendMessageAuthenticate(chunk);
+                }
             }
         }
 
@@ -1236,6 +1328,124 @@ namespace IrcDotNet
             var dateTime = message.Parameters[2];
 
             OnServerTimeReceived(new IrcServerTimeEventArgs(message, server, dateTime));
+        }
+
+        /// <summary>
+        ///     Process RPL_LOGGEDIN (900) responses from the server during SASL authentication.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("900")]
+        protected internal void ProcessMessageSaslLoggedIn(IrcMessage message)
+        {
+            // 900 indicates the user is now logged in (informational)
+            // Format: :server 900 nick nick!user@host account :You are now logged in as account
+            // Continue waiting for 903 (success) or failure numerics
+        }
+
+        /// <summary>
+        ///     Process RPL_SASLSUCCESS (903) responses from the server.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("903")]
+        protected internal void ProcessMessageSaslSuccess(IrcMessage message)
+        {
+            if (!saslInProgress)
+                return;
+
+            // SASL authentication succeeded
+            OnSaslAuthenticationSucceeded(new EventArgs());
+
+            saslInProgress = false;
+
+            // Complete registration by sending NICK/USER and raising Connected event
+            CompleteSaslRegistration();
+
+            // End capability negotiation
+            SendMessageCapEnd();
+        }
+
+        /// <summary>
+        ///     Process ERR_SASLFAIL (904) responses from the server.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("904")]
+        protected internal void ProcessMessageSaslFail(IrcMessage message)
+        {
+            if (!saslInProgress)
+                return;
+
+            string errorMessage = message.Parameters.Count > 1 ? message.Parameters[1] : "SASL authentication failed";
+            OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", errorMessage));
+
+            saslInProgress = false;
+
+            // Continue with registration anyway (unauthenticated)
+            CompleteSaslRegistration();
+            SendMessageCapEnd();
+        }
+
+        /// <summary>
+        ///     Process ERR_SASLTOOLONG (905) responses from the server.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("905")]
+        protected internal void ProcessMessageSaslTooLong(IrcMessage message)
+        {
+            if (!saslInProgress)
+                return;
+
+            OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", "SASL message too long"));
+
+            saslInProgress = false;
+            CompleteSaslRegistration();
+            SendMessageCapEnd();
+        }
+
+        /// <summary>
+        ///     Process ERR_SASLABORTED (906) responses from the server.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("906")]
+        protected internal void ProcessMessageSaslAborted(IrcMessage message)
+        {
+            if (!saslInProgress)
+                return;
+
+            OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", "SASL authentication aborted"));
+
+            saslInProgress = false;
+            CompleteSaslRegistration();
+            SendMessageCapEnd();
+        }
+
+        /// <summary>
+        ///     Process ERR_SASLALREADY (907) responses from the server.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("907")]
+        protected internal void ProcessMessageSaslAlready(IrcMessage message)
+        {
+            if (!saslInProgress)
+                return;
+
+            OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", "Already authenticated via SASL"));
+
+            saslInProgress = false;
+            CompleteSaslRegistration();
+            SendMessageCapEnd();
+        }
+
+        /// <summary>
+        ///     Process RPL_SASLMECHS (908) responses from the server.
+        /// </summary>
+        /// <param name="message">The message received from the server.</param>
+        [MessageProcessor("908")]
+        protected internal void ProcessMessageSaslMechs(IrcMessage message)
+        {
+            // 908 lists available SASL mechanisms
+            // Format: :server 908 nick mechanisms :are available
+            // For now, we only support PLAIN, so we treat this as informational
+            // Could be used in the future to support mechanism negotiation
         }
 
         /// <summary>
