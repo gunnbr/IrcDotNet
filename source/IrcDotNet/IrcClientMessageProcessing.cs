@@ -316,6 +316,7 @@ namespace IrcDotNet
                     serverCapabilities.Clear();
                     serverCapabilities.AddRange(caps);
 
+                    capabilityRequestSent = false;
                     OnServerCapabilitiesReceived(new EventArgs());
 
                     // If SASL is configured and the server supports it, request the capability.
@@ -331,6 +332,14 @@ namespace IrcDotNet
                         OnSaslAuthenticationFailed(new SaslAuthenticationFailedEventArgs("PLAIN", "Server does not support SASL"));
                         saslInProgress = false;
                         CompleteSaslRegistration();
+                        SendMessageCapEnd();
+                    }
+                    else if (!capabilityRequestSent && !IsRegistered)
+                    {
+                        // Non-SASL path: CAP LS makes the server hold registration until CAP END. When a
+                        // ServerCapabilitiesReceived handler requests a capability, the server's ACK or NAK
+                        // reply ends negotiation; otherwise nothing would, and registration would hang until
+                        // the server times it out.
                         SendMessageCapEnd();
                     }
                     break;
