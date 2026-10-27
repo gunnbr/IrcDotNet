@@ -301,5 +301,55 @@ namespace IrcDotNet.Test
             Assert.That(client.SentLines.Any(l => l.Contains("AUTHENTICATE")), Is.False,
                 "Non-SASL registration must not send AUTHENTICATE.");
         }
+
+        private static IrcUserRegistrationInfo CreatePlainRegInfo()
+        {
+            return new IrcUserRegistrationInfo
+            {
+                NickName = "plainnick",
+                UserName = "plainuser",
+                RealName = "Plain User",
+                UserModes = new List<char>(),
+                UseSasl = false
+            };
+        }
+
+        [Test]
+        public void NonSaslRegistration_EndsCapNegotiation_WhenNothingRequested()
+        {
+            var client = new TestableSaslIrcClient();
+            client.InitializeState();
+            client.BeginConnect(CreatePlainRegInfo());
+            Assert.That(client.SentLines.Any(l => l.Contains("CAP") && l.Contains("LS")), Is.True);
+            client.SentLines.Clear();
+
+            // The server holds registration after CAP LS until CAP END, so without one the
+            // connection never registers.
+            client.FeedCap("*", "LS", "multi-prefix sasl");
+
+            Assert.That(client.SentLines.Any(l => l.Contains("CAP") && l.Contains("END")), Is.True,
+                "Expected CAP END when no capability was requested.");
+            Assert.That(client.SentLines.Any(l => l.Contains("REQ")), Is.False);
+        }
+
+        [Test]
+        public void NonSaslRegistration_EndsCapNegotiationAfterAck_WhenHandlerRequestsCapability()
+        {
+            var client = new TestableSaslIrcClient();
+            client.InitializeState();
+            client.BeginConnect(CreatePlainRegInfo());
+            client.SentLines.Clear();
+
+            client.ServerCapabilitiesReceived += (s, e) => client.RequestCapability("multi-prefix");
+            client.FeedCap("*", "LS", "multi-prefix sasl");
+
+            Assert.That(client.SentLines.Any(l => l.Contains("CAP") && l.Contains("REQ") && l.Contains("multi-prefix")), Is.True);
+            Assert.That(client.SentLines.Any(l => l.Contains("CAP") && l.Contains("END")), Is.False,
+                "CAP END should wait for the server's reply to the request.");
+
+            client.FeedCap("*", "ACK", "multi-prefix");
+
+            Assert.That(client.SentLines.Count(l => l.Contains("CAP") && l.Contains("END")), Is.EqualTo(1));
+        }
     }
 }

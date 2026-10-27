@@ -2222,6 +2222,9 @@ namespace IrcDotNet
 
         // SASL authentication state for the current connection
         private bool saslInProgress;
+
+        // Whether a CAP REQ was sent while handling the latest CAP LS reply
+        private bool capabilityRequestSent;
         private IrcUserRegistrationInfo saslRegistrationInfo;
 
         // Collection of channel modes that apply to users in a channel.

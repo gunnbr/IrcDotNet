@@ -76,6 +76,7 @@ namespace IrcDotNet
             if (caps == null || caps.Length == 0)
                 return;
 
+            capabilityRequestSent = true;
             WriteMessage(null, "CAP", "REQ", string.Join(" ", caps));
         }
 
