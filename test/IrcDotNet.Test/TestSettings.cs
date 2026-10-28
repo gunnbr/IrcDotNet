@@ -8,7 +8,7 @@ namespace IrcDotNet.Test
     public static class TestSettings
     {
         /// <summary>
-        /// Server host name
+        /// Server host name, or null to skip the integration test
         /// </summary>
         public static string ServerHostName { get; set; }
 
@@ -51,8 +51,9 @@ namespace IrcDotNet.Test
             MessageProtocolError = Env("MessageProtocolError") ?? "Client {0}: protocol error {1}: {2}\nParameters: {2}";
             NickNameFormat = Env("NickNameFormat") ?? "itb-{0}";
             RealName = Env("RealName") ?? "IRC.Net Tester";
-            ServerHostName = Env("ServerHostName") ?? "irc.libera.chat";
-            ServerPort = Env("ServerPort") == null ? 8000 : Int32.Parse(Env("ServerPort"));  //Appveyor blocks port 6667
+            // No default server: the integration test only runs against a server named in ServerHostName.
+            ServerHostName = Env("ServerHostName");
+            ServerPort = Env("ServerPort") == null ? 6667 : Int32.Parse(Env("ServerPort"));
             ServerPassword = Env("ServerPassword") ?? "";
         }
     }

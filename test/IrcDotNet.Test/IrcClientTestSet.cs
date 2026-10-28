@@ -118,6 +118,10 @@ namespace IrcDotNet.Test
         [OneTimeSetUp]
         public static void ClassInitialize()
         {
+            // The integration test connects two clients to a real server, so only run it when one is named.
+            if (TestSettings.ServerHostName == null)
+                Assert.Ignore("Set ServerHostName (and ServerPort) to run the integration test against a test server.");
+
             stateManager = new TestStateManager<IrcClientTestState>();
 
             // Create instances of IRC clients.
@@ -218,8 +222,8 @@ namespace IrcDotNet.Test
                 ircClient2 = null;
             }
 
-            // Dispose all event wait handles in class.
-            GetAllWaitHandlesFields().ForEach(fieldInfo => ((IDisposable) fieldInfo.GetValue(null)).Dispose());
+            // Dispose all event wait handles in class (none were made if the test was skipped).
+            GetAllWaitHandlesFields().ForEach(fieldInfo => ((IDisposable) fieldInfo.GetValue(null))?.Dispose());
         }
 
         private static IEnumerable<FieldInfo> GetAllWaitHandlesFields()
@@ -863,15 +867,14 @@ namespace IrcDotNet.Test
         public void LocalUserModeTest()
         {
             stateManager.HasStates(IrcClientTestState.Client1Registered);
-            Assert.IsTrue(WaitForClientEvent(client1LocalUserModeChangedEvent, 10000),
-                "Client 1 failed to receive initial local user mode.");
-            Assert.IsTrue(ircClient1.LocalUser.Modes.Contains('i'),
-                "Client 1 local user does not initially have mode 'i'.");
-            Assert.IsFalse(ircClient1.LocalUser.Modes.Contains('w'), "Client 1 local user already has mode 'w'.");
-            ircClient1.LocalUser.SetModes("+w");
+            // Servers set different default modes (Libera gives +iw, InspIRCd none at all), so don't
+            // require an initial mode; just toggle 'w' from whatever the server set.
+            WaitForClientEvent(client1LocalUserModeChangedEvent, 2000);
+            var hadWallops = ircClient1.LocalUser.Modes.Contains('w');
+            ircClient1.LocalUser.SetModes(hadWallops ? "-w" : "+w");
             Assert.IsTrue(WaitForClientEvent(client1LocalUserModeChangedEvent, 10000),
                 "Client 1 failed to change local user mode.");
-            Assert.IsTrue(ircClient1.LocalUser.Modes.Contains('w'), "Client 1 local user modes are unchanged.");
+            Assert.AreEqual(!hadWallops, ircClient1.LocalUser.Modes.Contains('w'), "Client 1 local user modes are unchanged.");
         }
 
         public void LocalUserAwayTest()
@@ -954,8 +957,7 @@ namespace IrcDotNet.Test
 
             Assert.IsTrue(WaitForClientEvent(client1ChannelModeChangedEvent, 10000),
                 "Client 1 channel mode was not initialized.");
-            Assert.IsTrue(channel.Modes.Contains('n'),
-                "Client 1 channel does not initially have mode 'n'.");
+            // Default channel modes depend on the server (Libera sets +nt, InspIRCd can set none), so don't check them.
 
             Assert.IsFalse(channel.Modes.Contains('m'), "Client 1 channel already has mode 'm'.");
             channel.SetModes("+m");
