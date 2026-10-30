@@ -31,7 +31,15 @@ namespace IrcDotNet
         // Queue of pending messages and their tokens to be sent when ready.
         private readonly Queue<Tuple<string, object>> messageSendQueue;
         private CircularBufferStream receiveStream;
+
+        // The send timer runs only while messages are waiting, so an idle client doesn't wake up.
+        // sendLock guards the queue, sendEnabled and sendScheduled, and keeps timer callbacks from overlapping.
         private Timer sendTimer;
+        private readonly object sendLock = new object();
+        // Whether the connection is ready to send (set on connect, cleared on disconnect).
+        private bool sendEnabled;
+        // Whether the send timer is armed.
+        private bool sendScheduled;
 
         // Network (TCP) I/O.
         private Socket socket;
@@ -119,10 +127,13 @@ namespace IrcDotNet
                     dataStreamReader.Dispose();
                     dataStreamReader = null;
                 }
-                if (sendTimer != null)
+                lock (sendLock)
                 {
-                    sendTimer.Dispose();
-                    sendTimer = null;
+                    if (sendTimer != null)
+                    {
+                        sendTimer.Dispose();
+                        sendTimer = null;
+                    }
                 }
                 if (disconnectedEvent != null)
                 {
@@ -134,8 +145,44 @@ namespace IrcDotNet
 
         protected override void WriteMessage(string line, object token)
         {
-            // Add message line to send queue.
-            messageSendQueue.Enqueue(Tuple.Create(line + Environment.NewLine, token));
+            lock (sendLock)
+            {
+                // Add message line to send queue.
+                messageSendQueue.Enqueue(Tuple.Create(line + Environment.NewLine, token));
+
+                // Send it right away unless a send is already scheduled.
+                if (sendEnabled && !sendScheduled)
+                    ScheduleSend(0);
+            }
+        }
+
+        // Arms the send timer. Must be called with sendLock held.
+        private void ScheduleSend(long delay)
+        {
+            if (sendTimer == null)
+                return;
+            sendScheduled = true;
+            sendTimer.Change((int)delay, Timeout.Infinite);
+        }
+
+        private void StartSending()
+        {
+            lock (sendLock)
+            {
+                sendEnabled = true;
+                if (messageSendQueue.Count > 0)
+                    ScheduleSend(0);
+            }
+        }
+
+        private void StopSending()
+        {
+            lock (sendLock)
+            {
+                sendEnabled = false;
+                sendScheduled = false;
+                sendTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+            }
         }
 
         /// <inheritdoc cref="Connect(string, int, bool, IrcRegistrationInfo)" />
@@ -279,34 +326,42 @@ namespace IrcDotNet
         {
             try
             {
-                // Send pending messages in queue until flood preventer indicates to stop.
-                long sendDelay = 0;
-
-                while (messageSendQueue.Count > 0)
+                lock (sendLock)
                 {
-                    Debug.Assert(messageSendQueue.Count < 100);
-                    // Check that flood preventer currently permits sending of messages.
-                    if (FloodPreventer != null)
+                    sendScheduled = false;
+                    if (!sendEnabled)
+                        return;
+
+                    // Send pending messages in queue until flood preventer indicates to stop.
+                    long sendDelay = 0;
+
+                    while (messageSendQueue.Count > 0)
                     {
-                        sendDelay = FloodPreventer.GetSendDelay();
-                        if (sendDelay > 0)
-                            break;
+                        Debug.Assert(messageSendQueue.Count < 100);
+                        // Check that flood preventer currently permits sending of messages.
+                        if (FloodPreventer != null)
+                        {
+                            sendDelay = FloodPreventer.GetSendDelay();
+                            if (sendDelay > 0)
+                                break;
+                        }
+
+                        // Send next message in queue.
+                        var message = messageSendQueue.Dequeue();
+                        var line = message.Item1;
+                        var token = message.Item2;
+                        var lineBuffer = TextEncoding.GetBytes(line);
+                        SendAsync(lineBuffer, token);
+
+                        // Tell flood preventer mechanism that message has just been sent.
+                        if (FloodPreventer != null)
+                            FloodPreventer.HandleMessageSent();
                     }
 
-                    // Send next message in queue.
-                    var message = messageSendQueue.Dequeue();
-                    var line = message.Item1;
-                    var token = message.Item2;
-                    var lineBuffer = TextEncoding.GetBytes(line);
-                    SendAsync(lineBuffer, token);
-
-                    // Tell flood preventer mechanism that message has just been sent.
-                    if (FloodPreventer != null)
-                        FloodPreventer.HandleMessageSent();
+                    // If messages are still waiting, make timer fire when the next one should be written.
+                    if (messageSendQueue.Count > 0)
+                        ScheduleSend(Math.Max(sendDelay, minimumSendWaitTime));
                 }
-
-                // Make timer fire when next message in send queue should be written.
-                sendTimer.Change((int)Math.Max(sendDelay, minimumSendWaitTime), Timeout.Infinite);
             }
             catch (SocketException exSocket)
             {
@@ -607,7 +662,7 @@ namespace IrcDotNet
 
                     // Start sending; receiving is handled by a dedicated blocking read loop
                     // because the SslStream cannot be driven by the socket-level receive buffer.
-                    sendTimer.Change(0, Timeout.Infinite);
+                    StartSending();
 
                     sslReceiveThread = new Thread(SslReceiveLoop)
                     {
@@ -632,7 +687,7 @@ namespace IrcDotNet
                 dataStreamLineReader = new SafeLineReader(dataStreamReader);
 
                 // Start sending and receiving data to/from server.
-                sendTimer.Change(0, Timeout.Infinite);
+                StartSending();
                 ReceiveAsync();
 
                 HandleClientConnected(token.Item3);
@@ -721,7 +776,7 @@ namespace IrcDotNet
             DebugUtilities.WriteEvent("Disconnected from server.");
 
             // Stop sending messages immediately.
-            sendTimer.Change(Timeout.Infinite, Timeout.Infinite);
+            StopSending();
 
             // Set that client has disconnected.
             disconnectedEvent.Set();
